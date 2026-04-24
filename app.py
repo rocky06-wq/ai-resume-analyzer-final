@@ -1,210 +1,201 @@
 import streamlit as st
-from groq import Groq
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
-import pytesseract
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
-import tempfile
-
 import os
+import tempfile
 from dotenv import load_dotenv
 from groq import Groq
+import PyPDF2
+from pdf2image import convert_from_path
+import pytesseract
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-load_dotenv()
+# -------------------------
+# LOAD ENV
+# -------------------------
+load_dotenv(".env")
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+api_key = os.getenv("GROQ_API_KEY")
 
+if not api_key:
+    st.error("Groq API Key Missing")
+    st.stop()
+
+client = Groq(api_key=api_key)
+
+# -------------------------
+# OCR PATHS
+# -------------------------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 POPPLER_PATH = r"C:\poppler\Library\bin"
 
-st.set_page_config(page_title="AI Resume Analyzer", page_icon="💼")
+# -------------------------
+# PAGE
+# -------------------------
+st.set_page_config(page_title="AI Resume Analyzer", page_icon="💼", layout="wide")
 
 st.markdown("""
 <style>
 .stApp{
-background:linear-gradient(135deg,#0f172a,#111827,#1e293b);
+background:linear-gradient(135deg,#020617,#0f172a,#111827);
 color:white;
 }
-.stButton button{
-background:#22c55e;
+h1,h2,h3,p,label{
+color:white!important;
+}
+.stButton>button{
+background:#16a34a;
 color:white;
 border:none;
+padding:12px 20px;
 border-radius:10px;
-height:45px;
-width:100%;
-font-size:18px;
 font-weight:bold;
+font-size:18px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("💼 AI Resume Analyzer")
-st.write("AI Suggestions + Corporate Resume Generator")
+st.write("Upload Resume ➜ Get AI Suggestions + Updated Resume PDF")
 
-uploaded_file = st.file_uploader("Upload Resume PDF", type=["pdf"])
-
-def read_resume(file):
+# -------------------------
+# FUNCTIONS
+# -------------------------
+def extract_text(uploaded_file):
     text = ""
 
     try:
-        reader = PdfReader(file)
+        reader = PyPDF2.PdfReader(uploaded_file)
         for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                text += t + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
     except:
         pass
 
-    if len(text) < 40:
-        try:
-            images = convert_from_bytes(
-                file.getvalue(),
-                poppler_path=POPPLER_PATH
-            )
+    if len(text.strip()) > 80:
+        return text
 
-            for img in images:
-                text += pytesseract.image_to_string(img) + "\n"
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.getvalue())
+            temp_path = tmp.name
 
-        except:
-            pass
+        images = convert_from_path(temp_path, poppler_path=POPPLER_PATH)
 
-    return text.strip()
+        for img in images:
+            text += pytesseract.image_to_string(img)
 
-def create_pdf(content):
+        os.unlink(temp_path)
 
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    path = temp.name
+    except:
+        pass
 
-    doc = SimpleDocTemplate(path, pagesize=A4, topMargin=25, leftMargin=35, rightMargin=35)
+    return text
+
+
+def get_ai_response(resume_text):
+
+    prompt = f"""
+You are a professional resume expert.
+
+Analyze this resume and give:
+
+1. Resume Score out of 100
+2. Strengths
+3. Weaknesses
+4. Missing Skills
+5. ATS Improvement Tips
+6. Professional Improved Resume Rewrite
+
+Resume:
+{resume_text}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role":"user","content":prompt}],
+        temperature=0.4
+    )
+
+    return response.choices[0].message.content
+
+
+def create_pdf(text):
+
+    file_name = "Updated_Resume.pdf"
+
+    doc = SimpleDocTemplate(
+        file_name,
+        pagesize=A4,
+        rightMargin=25,
+        leftMargin=25,
+        topMargin=25,
+        bottomMargin=20
+    )
 
     styles = getSampleStyleSheet()
 
-    title_style = ParagraphStyle(
+    title = ParagraphStyle(
         name="title",
-        parent=styles["Heading1"],
-        fontSize=22,
-        alignment=TA_CENTER,
-        spaceAfter=14
+        fontSize=20,
+        leading=24,
+        alignment=1,
+        spaceAfter=20
     )
 
     normal = ParagraphStyle(
         name="normal",
-        parent=styles["Normal"],
-        fontSize=10.5,
-        leading=14,
-        spaceAfter=6
+        fontSize=11,
+        leading=15,
+        spaceAfter=8
     )
 
     story = []
 
-    first = True
+    story.append(Paragraph("Professional Updated Resume", title))
+    story.append(Spacer(1,12))
 
-    for line in content.split("\n"):
-
-        if line.strip() == "":
-            continue
-
-        if first:
-            story.append(Paragraph(line, title_style))
-            first = False
-        else:
+    for line in text.split("\n"):
+        if line.strip():
             story.append(Paragraph(line, normal))
 
     doc.build(story)
-    return path
+
+    return file_name
+
+# -------------------------
+# UI
+# -------------------------
+uploaded_file = st.file_uploader("Upload Resume PDF", type=["pdf"])
 
 if uploaded_file:
 
-    st.success("✅ Resume Uploaded")
+    st.success("Resume Uploaded")
 
-    text = read_resume(uploaded_file)
+    text = extract_text(uploaded_file)
 
-    if len(text) < 30:
-        st.error("❌ Cannot read resume")
-    else:
+    if len(text.strip()) < 50:
+        st.error("Resume text not readable")
+        st.stop()
 
-        st.success("✅ Resume Read Successfully")
+    if st.button("Generate Full AI Analysis"):
 
-        if st.button("🔍 Get AI Suggestions"):
+        with st.spinner("AI analyzing..."):
 
-            prompt = f"""
-Analyze this resume professionally.
+            result = get_ai_response(text)
 
-Give:
+            st.subheader("📊 AI Suggestions & Analysis")
+            st.write(result)
 
-1. Missing Skills
-2. Weak Points
-3. Better Summary Example
-4. ATS Improvements
-5. Hiring Chances
-6. Better Experience Example
-7. Salary Growth Tips
+            pdf_file = create_pdf(result)
 
-Resume:
-{text}
-"""
-
-            res = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role":"user","content":prompt}
-                ]
-            )
-
-            st.subheader("📌 AI Suggestions")
-            st.write(res.choices[0].message.content)
-
-        if st.button("✨ Generate Corporate Resume"):
-
-            prompt = f"""
-Rewrite this resume in CORPORATE PROFESSIONAL format.
-
-Make sections:
-
-Name
-Phone | Email | LinkedIn
-
-Professional Summary
-
-Skills
-
-Experience
-
-Education
-
-Projects
-
-Use bullet points.
-ATS Friendly.
-Strong professional wording.
-
-Return only final resume.
-
-Resume:
-{text}
-"""
-
-            res = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role":"user","content":prompt}
-                ]
-            )
-
-            final_resume = res.choices[0].message.content
-
-            st.subheader("📄 Resume Preview")
-            st.text_area("Preview", final_resume, height=550)
-
-            pdf_path = create_pdf(final_resume)
-
-            with open(pdf_path, "rb") as f:
+            with open(pdf_file, "rb") as f:
                 st.download_button(
-                    "📥 Download Resume PDF",
+                    "📄 Download Updated Resume PDF",
                     f,
-                    file_name="Corporate_Resume.pdf",
+                    file_name="Updated_Resume.pdf",
                     mime="application/pdf"
                 )
+
+            st.success("Resume Ready")
